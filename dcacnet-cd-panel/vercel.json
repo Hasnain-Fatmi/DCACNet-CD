@@ -1,14 +1,12 @@
 {
   "functions": {
-    "app/api/**/*.ts": {
+    "app/api/predict/route.ts": {
       "maxDuration": 60,
+      "memory": 3008
+    },
+    "app/api/model-info/route.ts": {
+      "maxDuration": 10,
       "memory": 1024
     }
-  },
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/"
-    }
-  ]
+  }
 }

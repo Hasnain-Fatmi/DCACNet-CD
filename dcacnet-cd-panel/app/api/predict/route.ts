@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import * as ort from 'onnxruntime-node';
+import * as ort from 'onnxruntime-web';
 import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs/promises';
+
+// Configure ONNX Runtime for Node.js environment
+ort.env.wasm.numThreads = 1;
+ort.env.wasm.simd = false;
 
 // Load model metadata
 const metadataPath = path.join(process.cwd(), 'public', 'model', 'model_metadata.json');
