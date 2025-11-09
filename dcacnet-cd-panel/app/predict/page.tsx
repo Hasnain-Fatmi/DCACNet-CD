@@ -50,6 +50,7 @@ export default function PredictPage() {
     const loadModel = async () => {
       try {
         setIsModelLoading(true);
+        ort.env.logLevel = 'error';
 
         // Load metadata
         const metaResponse = await fetch('/model/model_metadata.json');
