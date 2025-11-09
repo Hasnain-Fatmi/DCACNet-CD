@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { Upload, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 import Image from 'next/image';
+import * as ort from 'onnxruntime-web';
 
 interface Prediction {
   class: string;
@@ -21,12 +22,54 @@ interface PredictionResult {
   timestamp: string;
 }
 
+interface ModelMetadata {
+  image_size: number;
+  class_names: string[];
+  class_descriptions: Record<string, string>;
+  preprocessing: {
+    normalize: {
+      mean: number[];
+      std: number[];
+    };
+  };
+}
+
 export default function PredictPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isModelLoading, setIsModelLoading] = useState(true);
   const [result, setResult] = useState<PredictionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const sessionRef = useRef<ort.InferenceSession | null>(null);
+  const metadataRef = useRef<ModelMetadata | null>(null);
+
+  // Load model and metadata on component mount
+  useEffect(() => {
+    const loadModel = async () => {
+      try {
+        setIsModelLoading(true);
+
+        // Load metadata
+        const metaResponse = await fetch('/model/model_metadata.json');
+        metadataRef.current = await metaResponse.json();
+
+        // Load ONNX model
+        sessionRef.current = await ort.InferenceSession.create('/model/dcacnet_model.onnx', {
+          executionProviders: ['wasm'],
+        });
+
+        setIsModelLoading(false);
+      } catch (err) {
+        console.error('Model loading error:', err);
+        setError('Failed to load model. Please refresh the page.');
+        setIsModelLoading(false);
+      }
+    };
+
+    loadModel();
+  }, []);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const file = acceptedFiles[0];
@@ -46,30 +89,109 @@ export default function PredictPage() {
     multiple: false
   });
 
+  // Preprocess image to tensor
+  const preprocessImage = async (file: File): Promise<Float32Array> => {
+    const metadata = metadataRef.current!;
+    const size = metadata.image_size;
+    const mean = metadata.preprocessing.normalize.mean;
+    const std = metadata.preprocessing.normalize.std;
+
+    return new Promise((resolve, reject) => {
+      const img = new window.Image();
+      img.onload = () => {
+        // Create canvas
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d')!;
+
+        // Draw and resize image
+        ctx.drawImage(img, 0, 0, size, size);
+
+        // Get pixel data
+        const imageData = ctx.getImageData(0, 0, size, size);
+        const { data } = imageData;
+
+        // Convert to Float32Array in CHW format
+        const float32Data = new Float32Array(3 * size * size);
+        const pixelCount = size * size;
+
+        for (let i = 0; i < pixelCount; i++) {
+          const r = data[i * 4] / 255.0;
+          const g = data[i * 4 + 1] / 255.0;
+          const b = data[i * 4 + 2] / 255.0;
+
+          // Normalize and arrange in CHW format
+          float32Data[i] = (r - mean[0]) / std[0];
+          float32Data[pixelCount + i] = (g - mean[1]) / std[1];
+          float32Data[2 * pixelCount + i] = (b - mean[2]) / std[2];
+        }
+
+        resolve(float32Data);
+      };
+
+      img.onerror = reject;
+      img.src = URL.createObjectURL(file);
+    });
+  };
+
+  // Softmax function
+  const softmax = (logits: Float32Array): number[] => {
+    const arr = Array.from(logits);
+    const maxLogit = Math.max(...arr);
+    const expScores = arr.map(x => Math.exp(x - maxLogit));
+    const sumExp = expScores.reduce((a, b) => a + b, 0);
+    return expScores.map(x => x / sumExp);
+  };
+
   const handlePredict = async () => {
-    if (!selectedFile) return;
+    if (!selectedFile || !sessionRef.current || !metadataRef.current) return;
 
     setIsLoading(true);
     setError(null);
 
     try {
-      const formData = new FormData();
-      formData.append('image', selectedFile);
+      // Preprocess image
+      const inputData = await preprocessImage(selectedFile);
+      const metadata = metadataRef.current;
 
-      const response = await fetch('/api/predict', {
-        method: 'POST',
-        body: formData,
+      // Create tensor
+      const tensor = new ort.Tensor('float32', inputData, [1, 3, metadata.image_size, metadata.image_size]);
+
+      // Run inference
+      const feeds = { '': tensor };
+      const results = await sessionRef.current.run(feeds);
+      const outputName = Object.keys(results)[0];
+      const output = results[outputName].data as Float32Array;
+
+      // Apply softmax
+      const probabilities = softmax(output);
+
+      // Get predictions
+      const predictions: Prediction[] = probabilities.map((prob, idx) => ({
+        class: metadata.class_names[idx],
+        className: metadata.class_descriptions[metadata.class_names[idx]],
+        probability: prob,
+        confidence: (prob * 100).toFixed(2)
+      }));
+
+      // Sort by probability
+      predictions.sort((a, b) => b.probability - a.probability);
+
+      // Get top prediction
+      const topPrediction = predictions[0];
+
+      setResult({
+        success: true,
+        prediction: topPrediction.class,
+        className: topPrediction.className,
+        confidence: parseFloat(topPrediction.confidence),
+        allPredictions: predictions,
+        timestamp: new Date().toISOString()
       });
-
-      const data = await response.json();
-
-      if (data.success) {
-        setResult(data);
-      } else {
-        setError(data.error || 'Prediction failed');
-      }
     } catch (err) {
-      setError('Failed to connect to server');
+      console.error('Prediction error:', err);
+      setError('Failed to analyze image. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -88,6 +210,12 @@ export default function PredictPage() {
         <p className="text-gray-600 text-lg">
           Upload a skin lesion image to get an AI-powered classification
         </p>
+        {isModelLoading && (
+          <div className="mt-4 flex items-center justify-center text-blue-600">
+            <Loader2 className="animate-spin mr-2 h-5 w-5" />
+            <span className="text-sm">Loading model...</span>
+          </div>
+        )}
       </div>
 
       <div className="grid md:grid-cols-2 gap-8">
@@ -99,9 +227,9 @@ export default function PredictPage() {
               isDragActive
                 ? 'border-blue-500 bg-blue-50'
                 : 'border-gray-300 hover:border-gray-400'
-            }`}
+            } ${isModelLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
-            <input {...getInputProps()} />
+            <input {...getInputProps()} disabled={isModelLoading} />
             <Upload className="mx-auto h-12 w-12 text-gray-400 mb-4" />
             {isDragActive ? (
               <p className="text-blue-600 font-medium">Drop the image here...</p>
@@ -129,7 +257,7 @@ export default function PredictPage() {
               </div>
               <button
                 onClick={handlePredict}
-                disabled={isLoading}
+                disabled={isLoading || isModelLoading}
                 className="w-full mt-4 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
               >
                 {isLoading ? (
@@ -185,14 +313,14 @@ export default function PredictPage() {
                 <div className="bg-gray-50 rounded-lg p-3 flex items-center">
                   <CheckCircle2 className="h-5 w-5 text-green-600 mr-2" />
                   <p className="text-sm text-gray-700">
-                    Prediction completed successfully
+                    Analysis completed successfully
                   </p>
                 </div>
               </div>
 
               {/* All Predictions */}
               <div className="bg-white rounded-xl p-6 shadow-lg border border-gray-200">
-                <h3 className="font-semibold mb-4">All Predictions</h3>
+                <h3 className="font-semibold mb-4 text-gray-900">All Predictions</h3>
                 <div className="space-y-3">
                   {result.allPredictions.map((pred, idx) => (
                     <div key={idx} className="space-y-2">

@@ -1,20 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Disable image optimization to reduce routes
+  // Disable image optimization for better compatibility
   images: {
     unoptimized: true,
-  },
-  turbopack: {},
-
-  webpack: (config, { isServer }) => {
-    // Add WASM support
-    config.experiments = {
-      ...config.experiments,
-      asyncWebAssembly: true,
-    };
-
-    return config;
   },
 };
 
