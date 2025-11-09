@@ -5,6 +5,7 @@ const nextConfig: NextConfig = {
   images: {
     unoptimized: true,
   },
+  turbopack: {},
 
   webpack: (config, { isServer }) => {
     // Add WASM support
