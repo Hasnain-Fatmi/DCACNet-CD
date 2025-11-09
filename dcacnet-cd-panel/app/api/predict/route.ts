@@ -4,9 +4,9 @@ import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs/promises';
 
-// Configure ONNX Runtime for Node.js environment
+// Configure ONNX Runtime Web Assembly paths
+ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.2/dist/';
 ort.env.wasm.numThreads = 1;
-ort.env.wasm.simd = false;
 
 // Load model metadata
 const metadataPath = path.join(process.cwd(), 'public', 'model', 'model_metadata.json');
